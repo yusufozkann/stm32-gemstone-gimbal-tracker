@@ -28,13 +28,26 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+// her eksenin pid durumunu ayrı tutmak için
+typedef struct {
+    float kp, ki, kd;
+    float integral;      // hatanın zamana göre toplamı
+    float onceki_hata;   // türev için bir önceki adımın hatası
+} PID_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SERVO_MIN_US  500
-#define SERVO_MAX_US  2500
+// servo kalibrasyonu (ölçerek buldum)
+#define SERVO_MIN_US        500     // 0 derece
+#define SERVO_MAX_US        2500    // 180 derece
+
+// sanal kamera ayarları (esp32-cam qvga çözünürlüğü)
+#define GORUNTU_GENISLIK    320
+#define GORUNTU_YUKSEKLIK   240
+#define PIKSEL_PER_DERECE   5.33f   // 320 px / ~60 derece görüş açısı
+
+#define KONTROL_PERIYOT_MS  20      // kontrol döngüsü 50 hz
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -48,11 +61,27 @@ UART_HandleTypeDef hlpuart1;
 TIM_HandleTypeDef htim2;
 
 /* USER CODE BEGIN PV */
-uint8_t rx_byte;                    // gelen karakter buraya yazılacak
+// uart
+uint8_t rx_byte;                    // hal gelen karakteri buraya yazıyor
+char rx_buf[16];                    // komut burada birikiyor
+volatile uint8_t rx_idx = 0;        // isr ve main ikisi de değiştiriyor
+volatile uint8_t komut_hazir = 0;   // isr -> main bayrağı
 
-volatile uint8_t rx_idx = 0;        // ısr ve main değiştiriyor
-volatile uint8_t komut_hazir = 0;   // flag
-char rx_buf[16];                    //karakterler burda birikecek
+// pid (şimdilik sadece p)
+PID_t pid_pan  = {0.03f, 0.0f, 0.0f, 0.0f, 0.0f};
+PID_t pid_tilt = {0.03f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+// servoların şu anki açısı
+float pan_aci  = 90.0f;
+float tilt_aci = 90.0f;
+
+// sanal hedefin dünyadaki konumu (W komutuyla değişiyor)
+float hedef_pan  = 90.0f;
+float hedef_tilt = 90.0f;
+
+// zamanlama
+uint32_t son_kontrol   = 0;
+uint32_t son_telemetri = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -66,11 +95,28 @@ static void MX_LPUART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+// açıyı (0-180) darbe genişliğine çevirip ilgili kanala yazar
 void servo_aci_ayarla(uint32_t kanal, uint8_t aci)
 {
     if (aci > 180) aci = 180;
     uint32_t darbe = SERVO_MIN_US + ((uint32_t)aci * (SERVO_MAX_US - SERVO_MIN_US)) / 180;
     __HAL_TIM_SET_COMPARE(&htim2, kanal, darbe);
+}
+
+// pid çıkışını hesaplar, aynı fonksiyon iki eksen için de kullanılıyor
+float pid_hesapla(PID_t *pid, float hata, float dt)
+{
+    pid->integral += hata * dt;
+    float turev = (hata - pid->onceki_hata) / dt;
+    pid->onceki_hata = hata;
+    return pid->kp * hata + pid->ki * pid->integral + pid->kd * turev;
+}
+
+// kamera gelene kadar test için: hedef görüntüde nerede görünürdü?
+void sanal_kamera(float *x, float *y)
+{
+    *x = GORUNTU_GENISLIK  / 2.0f + (hedef_pan  - pan_aci)  * PIKSEL_PER_DERECE;
+    *y = GORUNTU_YUKSEKLIK / 2.0f + (hedef_tilt - tilt_aci) * PIKSEL_PER_DERECE;
 }
 /* USER CODE END 0 */
 
@@ -106,9 +152,10 @@ int main(void)
   MX_TIM2_Init();
   MX_LPUART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
-  HAL_UART_Receive_IT(&hlpuart1, &rx_byte, 1);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);      // pan
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);      // tilt
+  HAL_UART_Receive_IT(&hlpuart1, &rx_byte, 1);   // uart dinlemeye başla
+  son_kontrol = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -118,39 +165,67 @@ int main(void)
 
     /* USER CODE END WHILE */
 	    /* USER CODE BEGIN 3 */
+	    // 1) uart komutu: W<pan>,<tilt> ile sanal hedefi taşı
+	    if (komut_hazir)
+	    {
+	        char *w = strchr(rx_buf, 'W');
+	        char *v = strchr(rx_buf, ',');
+	        char msg[48];
+	        int len;
 
-	  if (komut_hazir)
-	  {
-	      int pan = -1, tilt = -1;
-	      char *p = strchr(rx_buf, 'P');   // 'P' harfinin yerini bul
-	      char *t = strchr(rx_buf, 'T');   // 'T' harfinin yerini bul
+	        if (w && v)
+	        {
+	            hedef_pan  = (float)atoi(w + 1);
+	            hedef_tilt = (float)atoi(v + 1);
+	            len = snprintf(msg, sizeof(msg), "Hedef: %d,%d\r\n", (int)hedef_pan, (int)hedef_tilt);
+	        }
+	        else
+	        {
+	            len = snprintf(msg, sizeof(msg), "Hata: W<pan>,<tilt>\r\n");
+	        }
 
-	      if (p) pan  = atoi(p + 1);       // harften sonraki sayıyı oku
-	      if (t) tilt = atoi(t + 1);
+	        HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, len, 100);
+	        rx_idx = 0;
+	        komut_hazir = 0;   // en son indir, yoksa isr eski indeksle yazabilir
+	    }
 
-	      char msg[48];
-	      int len;
+	    // 2) kontrol döngüsü, 20 ms'de bir (hal_delay ile bloklamıyorum)
+	    if (HAL_GetTick() - son_kontrol >= KONTROL_PERIYOT_MS)
+	    {
+	        son_kontrol += KONTROL_PERIYOT_MS;
+	        float dt = KONTROL_PERIYOT_MS / 1000.0f;
 
-	      if ((p && (pan < 0 || pan > 180)) || (t && (tilt < 0 || tilt > 180)))
-	      {
-	          len = snprintf(msg, sizeof(msg), "Hata: aci 0-180 olmali\r\n");
-	      }
-	      else if (!p && !t)
-	      {
-	          len = snprintf(msg, sizeof(msg), "Hata: P veya T yok\r\n");
-	      }
-	      else
-	      {
-	          if (p) servo_aci_ayarla(TIM_CHANNEL_1, (uint8_t)pan);
-	          if (t) servo_aci_ayarla(TIM_CHANNEL_2, (uint8_t)tilt);
-	          len = snprintf(msg, sizeof(msg), "OK P:%d T:%d\r\n", pan, tilt);
-	      }
+	        float x, y;
+	        sanal_kamera(&x, &y);
 
-	      HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, len, 100);
-	      rx_idx = 0;
-	      komut_hazir = 0;
-	  }
-  }
+	        // hata = hedefin merkezden uzaklığı (piksel)
+	        float hata_x = x - GORUNTU_GENISLIK  / 2.0f;
+	        float hata_y = y - GORUNTU_YUKSEKLIK / 2.0f;
+
+	        pan_aci  += pid_hesapla(&pid_pan,  hata_x, dt);
+	        tilt_aci += pid_hesapla(&pid_tilt, hata_y, dt);
+
+	        // servo sınırlarının dışına çıkmasın
+	        if (pan_aci  < 0)   pan_aci  = 0;
+	        if (pan_aci  > 180) pan_aci  = 180;
+	        if (tilt_aci < 0)   tilt_aci = 0;
+	        if (tilt_aci > 180) tilt_aci = 180;
+
+	        servo_aci_ayarla(TIM_CHANNEL_1, (uint8_t)(pan_aci  + 0.5f));   // +0.5 yuvarlama için
+	        servo_aci_ayarla(TIM_CHANNEL_2, (uint8_t)(tilt_aci + 0.5f));
+	    }
+
+	    // 3) telemetri, 200 ms'de bir durumu bas (nano printf %f desteklemiyor, int'e çeviriyorum)
+	    if (HAL_GetTick() - son_telemetri >= 200)
+	    {
+	        son_telemetri = HAL_GetTick();
+	        float x, y;
+	        sanal_kamera(&x, &y);
+	        char msg[64];
+	        int len = snprintf(msg, sizeof(msg), "x:%d y:%d pan:%d tilt:%d\r\n",
+	                           (int)x, (int)y, (int)pan_aci, (int)tilt_aci);
+	        HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, len, 100);
+	    }    }
   /* USER CODE END 3 */
 }
 
@@ -330,11 +405,12 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+// uart'tan her karakter gelince çağrılıyor
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == LPUART1)
     {
-        if (!komut_hazir)
+        if (!komut_hazir)   // main önceki komutu işlerken buffer'a dokunma
         {
             if (rx_byte == '\r' || rx_byte == '\n')
             {
@@ -344,14 +420,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
                     komut_hazir = 1;
                 }
             }
-            else if (rx_idx < sizeof(rx_buf) - 1)
+            else if (rx_idx < sizeof(rx_buf) - 1)   // taşma kontrolü
             {
                 rx_buf[rx_idx++] = rx_byte;
             }
         }
-        HAL_UART_Receive_IT(&hlpuart1, &rx_byte, 1);   // tekrar dinlemek için tekrar çağırıyoruz
+        HAL_UART_Receive_IT(&hlpuart1, &rx_byte, 1);   // tek seferlik, tekrar başlatıyorum
     }
 }
+
 /* USER CODE END 4 */
 
 /**
