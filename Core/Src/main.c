@@ -32,7 +32,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define SERVO_MIN_US  500
+#define SERVO_MAX_US  2500
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -63,14 +64,11 @@ static void MX_LPUART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#define SERVO_MIN_US  500    // 0° (kendi servonda bulduğun değer)
-#define SERVO_MAX_US  2500   // 180°
-
-void servo_aci_ayarla(uint8_t aci)
+void servo_aci_ayarla(uint32_t kanal, uint8_t aci)
 {
-    if (aci > 180) aci = 180;   // sınır kontrolü
+    if (aci > 180) aci = 180;
     uint32_t darbe = SERVO_MIN_US + ((uint32_t)aci * (SERVO_MAX_US - SERVO_MIN_US)) / 180;
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, darbe);
+    __HAL_TIM_SET_COMPARE(&htim2, kanal, darbe);
 }
 /* USER CODE END 0 */
 
@@ -107,6 +105,7 @@ int main(void)
   MX_LPUART1_UART_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
   HAL_UART_Receive_IT(&hlpuart1, &rx_byte, 1);
   /* USER CODE END 2 */
 
@@ -116,24 +115,14 @@ int main(void)
   {
 
     /* USER CODE END WHILE */
-	  if (komut_hazir)
-	  {
-	      int aci = atoi(rx_buf);
-	      if (aci >= 0 && aci <= 180)
-	      {
-	          servo_aci_ayarla((uint8_t)aci);
-	          char msg[32];
-	          int len = snprintf(msg, sizeof(msg), "Aci: %d\r\n", aci);
-	          HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, len, 100);
-	      }
-	      else
-	      {
-	          HAL_UART_Transmit(&hlpuart1, (uint8_t *)"Hata: 0-180 arasi girin \r\n", 30, 100);
-	      }
-	      rx_idx = 0;
-	      komut_hazir = 0;   // bitince tekrar sıfırla
-	  }
-    /* USER CODE BEGIN 3 */
+	    /* USER CODE BEGIN 3 */
+
+	  servo_aci_ayarla(TIM_CHANNEL_1, 45);
+	  servo_aci_ayarla(TIM_CHANNEL_2, 45);
+	  HAL_Delay(1000);
+	  servo_aci_ayarla(TIM_CHANNEL_1, 135);
+	  servo_aci_ayarla(TIM_CHANNEL_2, 135);
+	  HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }
@@ -280,6 +269,10 @@ static void MX_TIM2_Init(void)
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
