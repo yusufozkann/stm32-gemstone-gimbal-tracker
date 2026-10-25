@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,9 +49,10 @@ TIM_HandleTypeDef htim2;
 
 /* USER CODE BEGIN PV */
 uint8_t rx_byte;                    // gelen karakter buraya yazılacak
-char rx_buf[8];                     // komutlar burda birikecek
+
 volatile uint8_t rx_idx = 0;        // ısr ve main değiştiriyor
 volatile uint8_t komut_hazir = 0;   // flag
+char rx_buf[16];                    //karakterler burda birikecek
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -117,12 +119,37 @@ int main(void)
     /* USER CODE END WHILE */
 	    /* USER CODE BEGIN 3 */
 
-	  servo_aci_ayarla(TIM_CHANNEL_1, 45);
-	  servo_aci_ayarla(TIM_CHANNEL_2, 45);
-	  HAL_Delay(1000);
-	  servo_aci_ayarla(TIM_CHANNEL_1, 135);
-	  servo_aci_ayarla(TIM_CHANNEL_2, 135);
-	  HAL_Delay(1000);
+	  if (komut_hazir)
+	  {
+	      int pan = -1, tilt = -1;
+	      char *p = strchr(rx_buf, 'P');   // 'P' harfinin yerini bul
+	      char *t = strchr(rx_buf, 'T');   // 'T' harfinin yerini bul
+
+	      if (p) pan  = atoi(p + 1);       // harften sonraki sayıyı oku
+	      if (t) tilt = atoi(t + 1);
+
+	      char msg[48];
+	      int len;
+
+	      if ((p && (pan < 0 || pan > 180)) || (t && (tilt < 0 || tilt > 180)))
+	      {
+	          len = snprintf(msg, sizeof(msg), "Hata: aci 0-180 olmali\r\n");
+	      }
+	      else if (!p && !t)
+	      {
+	          len = snprintf(msg, sizeof(msg), "Hata: P veya T yok\r\n");
+	      }
+	      else
+	      {
+	          if (p) servo_aci_ayarla(TIM_CHANNEL_1, (uint8_t)pan);
+	          if (t) servo_aci_ayarla(TIM_CHANNEL_2, (uint8_t)tilt);
+	          len = snprintf(msg, sizeof(msg), "OK P:%d T:%d\r\n", pan, tilt);
+	      }
+
+	      HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, len, 100);
+	      rx_idx = 0;
+	      komut_hazir = 0;
+	  }
   }
   /* USER CODE END 3 */
 }
