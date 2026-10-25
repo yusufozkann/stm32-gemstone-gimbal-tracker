@@ -162,70 +162,80 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-
     /* USER CODE END WHILE */
-	    /* USER CODE BEGIN 3 */
-	    // 1) uart komutu: W<pan>,<tilt> ile sanal hedefi taşı
-	    if (komut_hazir)
-	    {
-	        char *w = strchr(rx_buf, 'W');
-	        char *v = strchr(rx_buf, ',');
-	        char msg[48];
-	        int len;
 
-	        if (w && v)
-	        {
-	            hedef_pan  = (float)atoi(w + 1);
-	            hedef_tilt = (float)atoi(v + 1);
-	            len = snprintf(msg, sizeof(msg), "Hedef: %d,%d\r\n", (int)hedef_pan, (int)hedef_tilt);
-	        }
-	        else
-	        {
-	            len = snprintf(msg, sizeof(msg), "Hata: W<pan>,<tilt>\r\n");
-	        }
+    /* USER CODE BEGIN 3 */
 
-	        HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, len, 100);
-	        rx_idx = 0;
-	        komut_hazir = 0;   // en son indir, yoksa isr eski indeksle yazabilir
-	    }
+    // 1) uart komutu: W<pan>,<tilt> hedefi taşır, K<kp*1000> kazancı değiştirir
+    if (komut_hazir)
+    {
+        char *w = strchr(rx_buf, 'W');
+        char *v = strchr(rx_buf, ',');
+        char *k = strchr(rx_buf, 'K');
+        char msg[48];
+        int len;
 
-	    // 2) kontrol döngüsü, 20 ms'de bir (hal_delay ile bloklamıyorum)
-	    if (HAL_GetTick() - son_kontrol >= KONTROL_PERIYOT_MS)
-	    {
-	        son_kontrol += KONTROL_PERIYOT_MS;
-	        float dt = KONTROL_PERIYOT_MS / 1000.0f;
+        if (k)   // K30 -> kp = 0.030 (float parse etmemek için binde bir)
+        {
+            float yeni_kp = atoi(k + 1) / 1000.0f;
+            pid_pan.kp  = yeni_kp;
+            pid_tilt.kp = yeni_kp;
+            len = snprintf(msg, sizeof(msg), "Kp: %d/1000\r\n", atoi(k + 1));
+        }
+        else if (w && v)
+        {
+            hedef_pan  = (float)atoi(w + 1);
+            hedef_tilt = (float)atoi(v + 1);
+            len = snprintf(msg, sizeof(msg), "Hedef: %d,%d\r\n", (int)hedef_pan, (int)hedef_tilt);
+        }
+        else
+        {
+            len = snprintf(msg, sizeof(msg), "Hata: W<pan>,<tilt> veya K<kp>\r\n");
+        }
 
-	        float x, y;
-	        sanal_kamera(&x, &y);
+        HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, len, 100);
+        rx_idx = 0;
+        komut_hazir = 0;   // en son indir, yoksa isr eski indeksle yazabilir
+    }
 
-	        // hata = hedefin merkezden uzaklığı (piksel)
-	        float hata_x = x - GORUNTU_GENISLIK  / 2.0f;
-	        float hata_y = y - GORUNTU_YUKSEKLIK / 2.0f;
+    // 2) kontrol döngüsü, 20 ms'de bir (hal_delay ile bloklamıyorum)
+    if (HAL_GetTick() - son_kontrol >= KONTROL_PERIYOT_MS)
+    {
+        son_kontrol += KONTROL_PERIYOT_MS;
+        float dt = KONTROL_PERIYOT_MS / 1000.0f;
 
-	        pan_aci  += pid_hesapla(&pid_pan,  hata_x, dt);
-	        tilt_aci += pid_hesapla(&pid_tilt, hata_y, dt);
+        float x, y;
+        sanal_kamera(&x, &y);
 
-	        // servo sınırlarının dışına çıkmasın
-	        if (pan_aci  < 0)   pan_aci  = 0;
-	        if (pan_aci  > 180) pan_aci  = 180;
-	        if (tilt_aci < 0)   tilt_aci = 0;
-	        if (tilt_aci > 180) tilt_aci = 180;
+        // hata = hedefin merkezden uzaklığı (piksel)
+        float hata_x = x - GORUNTU_GENISLIK  / 2.0f;
+        float hata_y = y - GORUNTU_YUKSEKLIK / 2.0f;
 
-	        servo_aci_ayarla(TIM_CHANNEL_1, (uint8_t)(pan_aci  + 0.5f));   // +0.5 yuvarlama için
-	        servo_aci_ayarla(TIM_CHANNEL_2, (uint8_t)(tilt_aci + 0.5f));
-	    }
+        pan_aci  += pid_hesapla(&pid_pan,  hata_x, dt);
+        tilt_aci += pid_hesapla(&pid_tilt, hata_y, dt);
 
-	    // 3) telemetri, 200 ms'de bir durumu bas (nano printf %f desteklemiyor, int'e çeviriyorum)
-	    if (HAL_GetTick() - son_telemetri >= 200)
-	    {
-	        son_telemetri = HAL_GetTick();
-	        float x, y;
-	        sanal_kamera(&x, &y);
-	        char msg[64];
-	        int len = snprintf(msg, sizeof(msg), "x:%d y:%d pan:%d tilt:%d\r\n",
-	                           (int)x, (int)y, (int)pan_aci, (int)tilt_aci);
-	        HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, len, 100);
-	    }    }
+        // servo sınırlarının dışına çıkmasın
+        if (pan_aci  < 0)   pan_aci  = 0;
+        if (pan_aci  > 180) pan_aci  = 180;
+        if (tilt_aci < 0)   tilt_aci = 0;
+        if (tilt_aci > 180) tilt_aci = 180;
+
+        servo_aci_ayarla(TIM_CHANNEL_1, (uint8_t)(pan_aci  + 0.5f));   // +0.5 yuvarlama için
+        servo_aci_ayarla(TIM_CHANNEL_2, (uint8_t)(tilt_aci + 0.5f));
+    }
+
+    // 3) telemetri, 200 ms'de bir durumu bas (nano printf %f desteklemiyor, int'e çeviriyorum)
+    if (HAL_GetTick() - son_telemetri >= 200)
+    {
+        son_telemetri = HAL_GetTick();
+        float x, y;
+        sanal_kamera(&x, &y);
+        char msg[64];
+        int len = snprintf(msg, sizeof(msg), "x:%d y:%d pan:%d tilt:%d\r\n",
+                           (int)x, (int)y, (int)pan_aci, (int)tilt_aci);
+        HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, len, 100);
+    }
+  }
   /* USER CODE END 3 */
 }
 
