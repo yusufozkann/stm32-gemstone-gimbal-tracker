@@ -2,3 +2,5 @@ Debug/
 Release/
 *.launch
 .settings/
+*.pt
+desktop.ini
